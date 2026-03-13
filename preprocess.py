@@ -1,66 +1,72 @@
 import argparse
 import traceback as tb
-import csv
-import glob
 import json
 import numpy as np
 import os
-from rdkit import Chem
+from datasets import load_from_disk
+from rdkit import Chem, RDLogger
 from SmilesPE.pretokenizer import atomwise_tokenizer
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
+
+RDLogger.DisableLog('rdApp.*')
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expt_id", type=str, default=None, required=True)
+    # parser.add_argument("--expt_id", type=str, default=None, required=True)
 
     return parser.parse_args()
 
 
-def parse_mol_file(mol_file: str) -> List[Tuple[int, int, int]]:
+def parse_molblock(molblock: str) -> List[Tuple[int, int, int]]:
     # RDKit does not track BEGINWEDGE/BEGINDASH by default
     # need to manually parse this info from molfile, like in MolScribe
-    with open(mol_file) as f:
-        mol_data = f.read()
-        lines = mol_data.split('\n')
-        stereo_bonds = []
 
-        for i, line in enumerate(lines):
-            if line.endswith("V2000"):
-                tokens = line.split()
-                num_atoms = int(tokens[0])
-                num_bonds = int(tokens[1])
-                for atom_line in lines[i+1:i+1+num_atoms]:
-                    # atom_tokens = atom_line.strip().split()
-                    # coords.append([float(atom_tokens[0]), float(atom_tokens[1])])
-                    pass
-                for bond_line in lines[i+1+num_atoms:i+1+num_atoms+num_bonds]:
-                    # bond_tokens = bond_line.strip().split()
-                    # start, end, bond_type, stereo = [int(token) for token in bond_tokens[:4]]
+    lines = molblock.split('\n')
+    stereo_bonds = []
 
-                    bond_tokens = [bond_line[:3], bond_line[3:6], bond_line[6:9], bond_line[9:12]]
-                    start, end, bond_type, stereo = [int(token) for token in bond_tokens]
+    for i, line in enumerate(lines):
+        if "BEGIN" in line and "CTAB" in line:
+            _, _, _, num_atoms, num_bonds, _, _, _ = lines[i+1].split()
+            num_atoms = int(num_atoms)
+            num_bonds = int(num_bonds)
+            continue
+        if "BEGIN" in line and "BOND" in line:
+            for bond_line in lines[i+1:i+1+num_bonds]:
+                bond_tokens = bond_line.split()
+                bond_type = int(bond_tokens[3])
+                start = int(bond_tokens[4])
+                end = int(bond_tokens[5])
 
-                    if bond_type == 1:
-                        if stereo == 0:
-                            continue
+                try:
+                    stereo = bond_tokens[6]
+                except IndexError:
+                    continue
 
-                        if stereo == 1:
-                            etype = 5
-                        elif stereo == 6:
-                            etype = 6
-                        elif stereo == 4:
-                            etype = 8
-                        else:
-                            raise ValueError(f"Unsupported stereo type: {stereo}, {mol_file}")
-                        stereo_bonds.append((start - 1, end - 1, etype))
-                break
+                if stereo.startswith("ENDPTS"):
+                    continue
+
+                if bond_type == 1:
+                    # Up (wedge)
+                    if stereo == "CFG=1":
+                        etype = 5
+                    # Down (dash)
+                    elif stereo == "CFG=3":
+                        etype = 6
+                    # Either (wavy)
+                    elif stereo == "CFG=2":
+                        etype = 8
+                    else:
+                        raise ValueError(f"Unsupported stereo type: {stereo}, {molblock}")
+                    stereo_bonds.append((start - 1, end - 1, etype))
+
+            break
 
     return stereo_bonds
 
 
-def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
-    stereo_bonds = parse_mol_file(mol_path)
+def get_edges(mol, molblock: str, inverse_map: list) -> List[List]:
+    stereo_bonds = parse_molblock(molblock=molblock)
     stereo_bonds = {
         (start, end): bond_type
         for start, end, bond_type in stereo_bonds
@@ -72,7 +78,7 @@ def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
         try:
             assert bond_type.is_integer() or bond_type == 1.5
         except AssertionError:
-            print(f"{bond_type}, {mol_path}")
+            print(f"{bond_type}, {molblock}")
             break
 
         if bond_type == 1.5:
@@ -102,26 +108,51 @@ def _get_edges(mol, mol_path: str, inverse_map: list) -> List[List]:
         edge = [begin_atom_i, end_atom_i, bond_type]
         edges.append(edge)
 
+        props = bond.GetPropsAsDict()
+        if "_MolFileBondEndPts" in props:
+            assert "_MolFileBondAttach" in props
+            endpts = props["_MolFileBondEndPts"][1:-1].split()
+            count = int(endpts[0])
+            assert len(endpts) == count + 1
+
+            if props["_MolFileBondAttach"] == "ANY":
+                bond_type = 9
+            elif props["_MolFileBondAttach"] == "ALL":
+                bond_type = 10
+            else:
+                raise NotImplementedError(props["_MolFileBondAttach"])
+
+            for endpt in endpts[1:]:
+                endpt_i_in_mol = int(endpt) - 1
+                endpt_i = inverse_map[endpt_i_in_mol]
+
+                edge = [begin_atom_i, endpt_i, bond_type]
+                edges.append(edge)
+
     return edges
 
 
-def _get_row(png_fn: str) -> Dict[str, str]:
-    png_path = png_fn
-    mol_path = f"{png_fn[:-4]}.corrected.mol"
-
-    assert os.path.exists(png_path), png_path
-    assert os.path.exists(mol_path), mol_path
+def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
+    example_id = example["id"]
+    molblock = example["mol"]
 
     # Disable sanitization to suppress aromatic labeling by rdkit.
     # The data provider should ensure the correctness of molfiles.
-    mol = Chem.MolFromMolFile(mol_path, sanitize=False, removeHs=False)
+    mol = Chem.MolFromMolBlock(molblock, sanitize=False, removeHs=False, strictParsing=False)
     # Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
     # Chem.Kekulize(mol)
     # raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=False)
+
+    # for atom in mol.GetAtoms():
+    #     if atom.GetAtomicNum() == 0:
+    #         props = atom.GetPropsAsDict()
+    #         print(f"Atom {atom.GetIdx()}: {props}")
+    # exit(0)
+
     try:
         raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False)
     except RuntimeError:
-        print(f"Runtime error for {png_fn}")
+        print(f"Runtime error for row idx: {idx}")
         tb.print_exc()
         raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False, isomericSmiles=False)
 
@@ -133,9 +164,14 @@ def _get_row(png_fn: str) -> Dict[str, str]:
     smi = raw_smi
     superatoms = {}
     for atom_idx, atom in enumerate(mol.GetAtoms()):
-        alias = atom.GetPropsAsDict().get("molFileAlias")
+        props = atom.GetPropsAsDict()
+        alias = props.get("molFileAlias")
         if alias:
             superatoms[inverse_map[atom_idx]] = alias
+        else:
+            dummy_label = props.get("dummyLabel")
+            if dummy_label:
+                superatoms[inverse_map[atom_idx]] = dummy_label
 
     # copied over from molscribe
     if superatoms:
@@ -155,14 +191,14 @@ def _get_row(png_fn: str) -> Dict[str, str]:
         coord = conf.GetAtomPosition(atom_i)
         node_coords.append([coord.x, coord.y])
 
-    edges = _get_edges(mol=mol, mol_path=mol_path, inverse_map=inverse_map)
+    edges = get_edges(mol=mol, molblock=molblock, inverse_map=inverse_map)
 
     bracket_tokens = []
     bracket_coords = []
     for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
         brackets = sg.GetBrackets()
         if len(brackets) > 2:
-            print(f"{len(brackets)} brackets found for {mol_path}")
+            print(f"{len(brackets)} brackets found for row idx: {idx}")
 
         properties = sg.GetPropsAsDict()
         SCN = properties.get("CONNECT", "")  # superscript, essentially
@@ -194,52 +230,45 @@ def _get_row(png_fn: str) -> Dict[str, str]:
         bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
 
     row = {
-        "file_path": png_path,
-        "mol_path": mol_path,
+        "idx": idx,
+        "id": example_id,
         "raw_SMILES": raw_smi,
         "SMILES": smi,
         "node_coords": json.dumps(node_coords, separators=(",", ":")),
         "bracket_tokens": json.dumps(bracket_tokens, separators=(",", ":")),
         "bracket_coords": json.dumps(bracket_coords, separators=(",", ":")),
-        "edges": json.dumps(edges, separators=(",", ":")),
+        "edges": json.dumps(edges, separators=(",", ":"))
     }
 
     return row
 
 
+def dataset2csv(dataset, ofn: str) -> None:
+    updated_dataset = dataset.map(
+        get_row,
+        with_indices=True,
+        num_proc=8,
+        remove_columns=dataset.column_names
+    )
+    updated_dataset.to_csv(ofn)
+
+
 def aggregate_into_csv(args) -> None:
-    fieldnames = [
-        "file_path", "mol_path",
-        "raw_SMILES", "SMILES", "node_coords",
-        "bracket_tokens", "bracket_coords", "edges"
+    csv_output_path = "data/hf"
+    os.makedirs(csv_output_path, exist_ok=True)
+    dataset_dirs = [
+        ("data/hf/markushgrapher-synthetic-training", "train", "synthetic-train.processed.csv"),
+        ("data/hf/markushgrapher-synthetic-training", "test", "synthetic-val.processed.csv")
+        # ("data/hf/markushgrapher-synthetic", "test", "synthetic-test.processed.csv")
     ]
 
-    for phase in ["train", "val", "test"]:
-        fn = os.path.join("experiments", args.expt_id, f"{args.expt_id}_{phase}.filelist.txt"
-        )
-        if not os.path.exists(fn):
-            continue
+    for dataset_dir, split, csv_fn in dataset_dirs:
+        ofn = os.path.join(csv_output_path, csv_fn)
 
-        ofn = os.path.join("experiments", args.expt_id, f"{args.expt_id}_{phase}.processed.csv")
+        dataset = load_from_disk(dataset_dir)
+        dataset = dataset[split]
 
-        rows = []
-        with open(fn, "r") as f:
-            for line in f:
-                if line.strip().endswith("/"):
-                    png_fl = sorted(glob.glob(f"{line.strip()}/*.png"))
-                    for png_fn in png_fl:
-                        row = _get_row(png_fn=png_fn)
-                        rows.append(row)
-                else:
-                    png_fn = line.strip()
-                    assert png_fn.endswith(".png"), png_fn
-                    row = _get_row(png_fn=png_fn)
-                    rows.append(row)
-
-        with open(ofn, "w") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+        dataset2csv(dataset=dataset, ofn=ofn)
 
 
 def main(args):
