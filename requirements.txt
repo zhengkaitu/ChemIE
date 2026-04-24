@@ -1,5 +1,6 @@
 albumentations @ git+https://github.com/albumentations-team/albumentations@37e714fd2e326f6f88778e425f98c2de8c8d5372
 cairosvg==2.7.1
+datasets==4.5.0
 huggingface-hub==0.28.1
 matplotlib==3.9.4
 numpy==1.26.4

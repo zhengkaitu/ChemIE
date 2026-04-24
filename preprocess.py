@@ -195,39 +195,43 @@ def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
 
     bracket_tokens = []
     bracket_coords = []
-    for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
-        brackets = sg.GetBrackets()
-        if len(brackets) > 2:
-            print(f"{len(brackets)} brackets found for row idx: {idx}")
+    try:
+        for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
+            brackets = sg.GetBrackets()
+            # if len(brackets) > 2:
+            #     print(f"{len(brackets)} brackets found for row idx: {idx}")
 
-        properties = sg.GetPropsAsDict()
-        SCN = properties.get("CONNECT", "")  # superscript, essentially
-        SMT = properties.get("LABEL", "")  # subscript, essentially
-        # print(brackets)
-        # use for loop to cover images with >2 brackets
-        for bracket in brackets[:-1]:
+            properties = sg.GetPropsAsDict()
+            SCN = properties.get("CONNECT", "")  # superscript, essentially
+            SMT = properties.get("LABEL", "")  # subscript, essentially
+            # print(brackets)
+            # use for loop to cover images with >2 brackets
+            for bracket in brackets[:-1]:
+                bracket_tokens.append(["<bra>"])
+                bracket_coords.append([bracket[0].x, bracket[0].y])
+                bracket_tokens.append(["<ket>"])
+                bracket_coords.append([bracket[1].x, bracket[1].y])
+
+            # lastly, attaching CONNECT and LABEL with the last <ket>
+            # just to keep a record and ensure length consistency.
+            # These will be further processed downstream
+
+            # bracket_tokens.append(["<bra>"] + [token for token in SCN])
+            # bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
+            # bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
+            # bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
+
             bracket_tokens.append(["<bra>"])
-            bracket_coords.append([bracket[0].x, bracket[0].y])
-            bracket_tokens.append(["<ket>"])
-            bracket_coords.append([bracket[1].x, bracket[1].y])
-
-        # lastly, attaching CONNECT and LABEL with the last <ket>
-        # just to keep a record and ensure length consistency.
-        # These will be further processed downstream
-
-        # bracket_tokens.append(["<bra>"] + [token for token in SCN])
-        # bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
-        # bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
-        # bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
-
-        bracket_tokens.append(["<bra>"])
-        bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
-        bracket_tokens.append(
-            ["<ket>"] +
-            ["<scn>"] + [token for token in str(SCN)] +
-            ["<smt>"] + [token for token in str(SMT)]
-        )
-        bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
+            bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
+            bracket_tokens.append(
+                ["<ket>"] +
+                ["<scn>"] + [token for token in str(SCN)] +
+                ["<smt>"] + [token for token in str(SMT)]
+            )
+            bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
+    except IndexError:
+        bracket_tokens = []
+        bracket_coords = []
 
     row = {
         "idx": idx,

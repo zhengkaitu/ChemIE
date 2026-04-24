@@ -45,15 +45,16 @@ def get_transforms(input_size, augment=True, rotate=True, debug=False) -> A.Comp
 
 
 class TrainDataset(Dataset):
-    def __init__(self, args, df, tokenizer, split="train"):
+    def __init__(self, args, hf_dataset, df, tokenizer, split="train"):
         super().__init__()
         self.df = df
         self.args = args
         self.tokenizer = tokenizer
-        if 'file_path' in df.columns:
-            self.file_paths = df['file_path'].values
-            if not self.file_paths[0].startswith(args.data_path):
-                self.file_paths = [os.path.join(args.data_path, path) for path in df['file_path']]
+        # if 'file_path' in df.columns:
+        #     self.file_paths = df['file_path'].values
+        #     if not self.file_paths[0].startswith(args.data_path):
+        #         self.file_paths = [os.path.join(args.data_path, path) for path in df['file_path']]
+        self.hf_dataset = hf_dataset
 
         self.smiles = df['SMILES'].values if "SMILES" in df else None
         self.formats = args.formats
@@ -100,8 +101,12 @@ class TrainDataset(Dataset):
         cond = (idx == 0)
         cond = False
 
-        file_path = self.file_paths[idx]
-        image = cv2.imread(file_path)
+        # file_path = self.file_paths[idx]
+        # image = cv2.imread(file_path)
+        image = self.hf_dataset[idx]["page_image"].convert("RGB")
+        image = np.array(image)             # RGB uint8 numpy array
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
         if image is None:
             image = np.array([[[255., 255., 255.]] * 10] * 10).astype(np.float32)
             if cond: print(file_path, 'not found!')

@@ -8,6 +8,7 @@ import pandas as pd
 import time
 import torch
 import torch.distributed as dist
+from datasets import load_from_disk
 from molscribe.chemistry import convert_graph_to_molblock
 from molscribe.dataset import TrainDataset, polymer_collate
 from molscribe.loss import Criterion
@@ -57,11 +58,13 @@ def get_args():
     group.add_argument("--num_bond_type", help="Number of bond types including no bond", type=int, default=7)
     # Data
     parser.add_argument('--data_path', type=str, default=None)
+    parser.add_argument('--dataset_dir_train', type=str, default=None)
     parser.add_argument('--train_files', type=str, default=None)
     parser.add_argument('--val_file', type=str, default=None)
     parser.add_argument('--test_files', type=str, default=None)
     parser.add_argument('--coords_file', type=str, default=None)
     parser.add_argument('--vocab_file', type=str, default=None)
+
     parser.add_argument('--default_option', action='store_true')
     parser.add_argument('--include_condensed', action='store_true')
     parser.add_argument('--formats', type=str, default=None)
@@ -505,8 +508,11 @@ def train_loop(
     # ====================================================
     # loader
     # ====================================================
+    dataset_dir = args.dataset_dir_train
+    dataset = load_from_disk(dataset_dir)
+    dataset = dataset["train"]
 
-    train_dataset = TrainDataset(args, train_df, tokenizer, split="train")
+    train_dataset = TrainDataset(args, dataset, train_df, tokenizer, split="train")
     log_rank_0(train_dataset.transform)
 
     if args.local_rank != -1:
@@ -654,7 +660,11 @@ def inference(
 
     device = args.device
 
-    dataset = TrainDataset(args, data_df, tokenizer, split=split)
+    dataset_dir = args.dataset_dir_train
+    dataset = load_from_disk(dataset_dir)
+    dataset = dataset["test"]
+
+    dataset = TrainDataset(args, dataset, data_df, tokenizer, split=split)
     if args.local_rank != -1:
         sampler = DistributedSampler(dataset, shuffle=False)
     else:
@@ -700,9 +710,10 @@ def inference(
     log_rank_0("Start evaluation")
 
     # Deal with discrepancies between datasets
-    if 'image_id' not in data_df.columns:
-        data_df['image_id'] = [path.split('/')[-1].split('.')[0] for path in data_df['file_path']]
-    pred_df = data_df[['image_id']].copy()
+    # if 'image_id' not in data_df.columns:
+    #     data_df['image_id'] = [path.split('/')[-1].split('.')[0] for path in data_df['file_path']]
+    # pred_df = data_df[['image_id']].copy()
+    pred_df = data_df[['idx']].copy()
 
     format_ = "chartok_coords"
     format_preds = [preds[format_] for preds in predictions]
@@ -729,8 +740,8 @@ def inference(
         node_coords=pred_df["node_coords"],
         edges=pred_df["edges"],
         bracket_symbols=pred_df["bracket_symbols"],
-        bracket_coords=pred_df["bracket_coords"],
-        images=[cv2.imread(path) for path in data_df['file_path']]
+        bracket_coords=pred_df["bracket_coords"]
+        # images=[cv2.imread(path) for path in data_df['file_path']]
     )
 
     log_rank_0(f'Graph to SMILES success ratio: {r_success:.4f}')
@@ -764,7 +775,7 @@ def get_data(args) -> Tuple[
         ])
         log_rank_0(f'train.shape: {train_df.shape}')
     if args.do_train or args.do_val:
-        val_df = pd.read_csv(args.val_file)[:5]
+        val_df = pd.read_csv(args.val_file)[:10]
         val_df.attrs['file'] = args.val_file
         log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:

@@ -8,6 +8,8 @@ output/
 experiments/
 predictions/
 unused*
+test.mol
+test.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
