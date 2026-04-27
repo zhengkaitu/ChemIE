@@ -46,7 +46,7 @@ The following steps assume that the `molscribe` environment has been activated.
 ### 2. Prepare the data
 
 ```shell
-$ bash scripts/download_molscribe_data.sh
+$ bash scripts/download_data.sh
 ```
 
 ### 3. Download pretrained MolScribe checkpoint
@@ -55,15 +55,20 @@ $ bash scripts/download_molscribe_data.sh
 $ bash scripts/download_pretrained_checkpoint.sh
 ```
 
+### 4. Preprocessing
+
+```shell
+$ python preprocess.py
+```
+
 ### 4. Train MolScribe
 
 ```shell
-$ bash scripts/train_molscribe.sh
+$ bash scripts/submit_train_MGrapher_1+2.sh
 ```
 
 ### 5. Predict and evaluate with MolScribe
 
 ```shell
-$ bash scripts/predict_molscribe.sh
-$ bash scripts/evaluate_molscribe.sh
+$ python predict.py
 ```

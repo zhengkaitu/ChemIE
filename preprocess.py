@@ -1,12 +1,13 @@
 import argparse
+import glob
 import traceback as tb
 import json
 import numpy as np
 import os
-from datasets import load_from_disk
+from datasets import load_dataset, load_from_disk
 from rdkit import Chem, RDLogger
 from SmilesPE.pretokenizer import atomwise_tokenizer
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 RDLogger.DisableLog('rdApp.*')
 
@@ -132,13 +133,26 @@ def get_edges(mol, molblock: str, inverse_map: list) -> List[List]:
     return edges
 
 
+def load_mol(example: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
+    """Return (mol, molblock). molblock is None when the source is cxsmiles_dataset
+    (no authoritative molblock text is available for stereo-bond wedge parsing)."""
+    # Disable sanitization to suppress aromatic labeling by rdkit.
+    # The data provider should ensure the correctness of molfiles/cxsmiles.
+    if example.get("mol"):
+        molblock = example["mol"]
+        mol = Chem.MolFromMolBlock(
+            molblock, sanitize=False, removeHs=False, strictParsing=False
+        )
+        return mol, molblock
+
+    cxsmiles = example["cxsmiles_dataset"]
+    mol = Chem.MolFromSmiles(cxsmiles, sanitize=False)
+    return mol, None
+
+
 def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
     example_id = example["id"]
-    molblock = example["mol"]
-
-    # Disable sanitization to suppress aromatic labeling by rdkit.
-    # The data provider should ensure the correctness of molfiles.
-    mol = Chem.MolFromMolBlock(molblock, sanitize=False, removeHs=False, strictParsing=False)
+    mol, molblock = load_mol(example)
     # Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
     # Chem.Kekulize(mol)
     # raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=False)
@@ -165,13 +179,15 @@ def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
     superatoms = {}
     for atom_idx, atom in enumerate(mol.GetAtoms()):
         props = atom.GetPropsAsDict()
-        alias = props.get("molFileAlias")
+        # molFileAlias / dummyLabel come from molblock (MG1);
+        # atomLabel is how RDKit surfaces CXSMILES "$...$" labels (MG2).
+        alias = (
+            props.get("molFileAlias")
+            or props.get("dummyLabel")
+            or props.get("atomLabel")
+        )
         if alias:
             superatoms[inverse_map[atom_idx]] = alias
-        else:
-            dummy_label = props.get("dummyLabel")
-            if dummy_label:
-                superatoms[inverse_map[atom_idx]] = dummy_label
 
     # copied over from molscribe
     if superatoms:
@@ -191,47 +207,45 @@ def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
         coord = conf.GetAtomPosition(atom_i)
         node_coords.append([coord.x, coord.y])
 
-    edges = get_edges(mol=mol, molblock=molblock, inverse_map=inverse_map)
+    edges = get_edges(
+        mol=mol,
+        molblock=molblock if molblock is not None else "",
+        inverse_map=inverse_map,
+    )
 
-    bracket_tokens = []
-    bracket_coords = []
-    try:
-        for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
-            brackets = sg.GetBrackets()
-            # if len(brackets) > 2:
-            #     print(f"{len(brackets)} brackets found for row idx: {idx}")
+    bracket_tokens: List[List[str]] = []
+    bracket_coords: List[List[float]] = []
+    # CXSMILES doesn't encode bracket coordinates; skip those columns when the
+    # source is cxsmiles_dataset (no molblock).
+    if molblock is not None:
+        try:
+            for i, sg in enumerate(Chem.GetMolSubstanceGroups(mol)):
+                brackets = sg.GetBrackets()
 
-            properties = sg.GetPropsAsDict()
-            SCN = properties.get("CONNECT", "")  # superscript, essentially
-            SMT = properties.get("LABEL", "")  # subscript, essentially
-            # print(brackets)
-            # use for loop to cover images with >2 brackets
-            for bracket in brackets[:-1]:
+                properties = sg.GetPropsAsDict()
+                SCN = properties.get("CONNECT", "")  # superscript, essentially
+                SMT = properties.get("LABEL", "")  # subscript, essentially
+                # use for loop to cover images with >2 brackets
+                for bracket in brackets[:-1]:
+                    bracket_tokens.append(["<bra>"])
+                    bracket_coords.append([bracket[0].x, bracket[0].y])
+                    bracket_tokens.append(["<ket>"])
+                    bracket_coords.append([bracket[1].x, bracket[1].y])
+
+                # lastly, attaching CONNECT and LABEL with the last <ket>
+                # just to keep a record and ensure length consistency.
+                # These will be further processed downstream
                 bracket_tokens.append(["<bra>"])
-                bracket_coords.append([bracket[0].x, bracket[0].y])
-                bracket_tokens.append(["<ket>"])
-                bracket_coords.append([bracket[1].x, bracket[1].y])
-
-            # lastly, attaching CONNECT and LABEL with the last <ket>
-            # just to keep a record and ensure length consistency.
-            # These will be further processed downstream
-
-            # bracket_tokens.append(["<bra>"] + [token for token in SCN])
-            # bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
-            # bracket_tokens.append(["<ket>"] + [token for token in str(SMT)])
-            # bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
-
-            bracket_tokens.append(["<bra>"])
-            bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
-            bracket_tokens.append(
-                ["<ket>"] +
-                ["<scn>"] + [token for token in str(SCN)] +
-                ["<smt>"] + [token for token in str(SMT)]
-            )
-            bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
-    except IndexError:
-        bracket_tokens = []
-        bracket_coords = []
+                bracket_coords.append([brackets[-1][0].x, brackets[-1][0].y])
+                bracket_tokens.append(
+                    ["<ket>"] +
+                    ["<scn>"] + [token for token in str(SCN)] +
+                    ["<smt>"] + [token for token in str(SMT)]
+                )
+                bracket_coords.append([brackets[-1][1].x, brackets[-1][1].y])
+        except IndexError:
+            bracket_tokens = []
+            bracket_coords = []
 
     row = {
         "idx": idx,
@@ -257,20 +271,35 @@ def dataset2csv(dataset, ofn: str) -> None:
     updated_dataset.to_csv(ofn)
 
 
+def load_split(dataset_dir: str, split: str):
+    """Load a split from either a HF `load_from_disk` dir or a parquet layout
+    (one or more `{split}-*.parquet` files in the directory)."""
+    if os.path.exists(os.path.join(dataset_dir, "dataset_dict.json")):
+        return load_from_disk(dataset_dir)[split]
+
+    files = sorted(glob.glob(os.path.join(dataset_dir, f"{split}-*.parquet")))
+    if not files:
+        raise FileNotFoundError(
+            f"No split '{split}' found under {dataset_dir} "
+            f"(neither HF arrow nor parquet layout)"
+        )
+    return load_dataset("parquet", data_files=files, split="train")
+
+
 def aggregate_into_csv(args) -> None:
     csv_output_path = "data/hf"
     os.makedirs(csv_output_path, exist_ok=True)
     dataset_dirs = [
-        ("data/hf/markushgrapher-synthetic-training", "train", "synthetic-train.processed.csv"),
-        ("data/hf/markushgrapher-synthetic-training", "test", "synthetic-val.processed.csv")
-        # ("data/hf/markushgrapher-synthetic", "test", "synthetic-test.processed.csv")
+        ("data/MG1/markushgrapher-synthetic-training", "train", "synthetic-train.processed.csv"),
+        ("data/MG1/markushgrapher-synthetic-training", "test", "synthetic-test.processed.csv"),
+        ("data/MG2/uspto-mol-m-54k", "train", "uspto-mol-m-54k-train.processed.csv"),
+        ("data/MG2/uspto-mol-m-54k", "test", "uspto-mol-m-54k-test.processed.csv"),
     ]
 
     for dataset_dir, split, csv_fn in dataset_dirs:
         ofn = os.path.join(csv_output_path, csv_fn)
 
-        dataset = load_from_disk(dataset_dir)
-        dataset = dataset[split]
+        dataset = load_split(dataset_dir, split)
 
         dataset2csv(dataset=dataset, ofn=ofn)
 
