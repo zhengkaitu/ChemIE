@@ -25,7 +25,8 @@ if __name__ == "__main__":
     model = MolScribe(args.model_path, device) if args.model_path else None
 
     sources = [
-        ("./data", "m2s_images")
+        ("./data", "m2s_images"),
+        ("./data", "uspto-markush_images")
     ]
 
     root_output_path = f"predictions/image_comparison_{args.id}"

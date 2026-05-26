@@ -1,6 +1,7 @@
 import argparse
 import cv2
 import datetime
+import glob
 import json
 import numpy as np
 import os
@@ -8,7 +9,7 @@ import pandas as pd
 import time
 import torch
 import torch.distributed as dist
-from datasets import load_from_disk
+from datasets import concatenate_datasets, load_dataset, load_from_disk
 from molscribe.chemistry import convert_graph_to_molblock
 from molscribe.dataset import TrainDataset, polymer_collate
 from molscribe.loss import Criterion
@@ -22,6 +23,32 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import get_scheduler
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _load_one_split(dataset_dir: str, split: str):
+    """Load a split from a HF arrow dir or a parquet layout
+    (`{split}-*.parquet` files in `dataset_dir`)."""
+    dataset_dir = dataset_dir.strip()
+    if os.path.exists(os.path.join(dataset_dir, "dataset_dict.json")):
+        return load_from_disk(dataset_dir)[split]
+    files = sorted(glob.glob(os.path.join(dataset_dir, f"{split}-*.parquet")))
+    if not files:
+        raise FileNotFoundError(
+            f"No '{split}' split under {dataset_dir} (neither HF arrow nor parquet layout)"
+        )
+    return load_dataset("parquet", data_files=files, split="train")
+
+
+def load_image_dataset(dataset_dirs: str, split: str):
+    """Load and (if multiple sources) concatenate datasets, keeping only the
+    `page_image` column — that is the only field TrainDataset reads off the
+    underlying HF dataset. Concatenation requires a common schema, hence the
+    column trim."""
+    dirs = [d for d in dataset_dirs.split(",") if d.strip()]
+    parts = [_load_one_split(d, split).select_columns(["page_image"]) for d in dirs]
+    if len(parts) == 1:
+        return parts[0]
+    return concatenate_datasets(parts)
 
 
 def get_args():
@@ -508,9 +535,7 @@ def train_loop(
     # ====================================================
     # loader
     # ====================================================
-    dataset_dir = args.dataset_dir_train
-    dataset = load_from_disk(dataset_dir)
-    dataset = dataset["train"]
+    dataset = load_image_dataset(args.dataset_dir_train, split="train")
 
     train_dataset = TrainDataset(args, dataset, train_df, tokenizer, split="train")
     log_rank_0(train_dataset.transform)
@@ -660,9 +685,10 @@ def inference(
 
     device = args.device
 
-    dataset_dir = args.dataset_dir_train
-    dataset = load_from_disk(dataset_dir)
-    dataset = dataset["test"]
+    # val/test consumes a single CSV (--val_file), which by convention lines up
+    # with the FIRST entry of --dataset_dir_train.
+    val_dataset_dir = args.dataset_dir_train.split(",")[0]
+    dataset = load_image_dataset(val_dataset_dir, split="test")
 
     dataset = TrainDataset(args, dataset, data_df, tokenizer, split=split)
     if args.local_rank != -1:
@@ -770,12 +796,30 @@ def get_data(args) -> Tuple[
     train_df, val_df, test_df = None, None, None
     if args.do_train:
         train_files = args.train_files.split(',')
-        train_df = pd.concat([
-            pd.read_csv(file) for file in train_files
-        ])
+        train_dirs = args.dataset_dir_train.split(',')
+        if len(train_files) != len(train_dirs):
+            raise ValueError(
+                "--train_files and --dataset_dir_train must have the same "
+                f"number of comma-separated entries (got {len(train_files)} "
+                f"vs {len(train_dirs)})"
+            )
+        # Build hf_idx = position in the (concatenated) HF image dataset.
+        # The CSV's existing 'idx' column is per-source; we add per-source
+        # offsets so positional lookups into the concatenation are correct
+        # even when preprocess dropped unparseable rows.
+        per_source_dfs = []
+        offset = 0
+        for csv_path, dataset_dir in zip(train_files, train_dirs):
+            df = pd.read_csv(csv_path)
+            df["hf_idx"] = df["idx"] + offset
+            per_source_dfs.append(df)
+            offset += len(_load_one_split(dataset_dir, "train"))
+        train_df = pd.concat(per_source_dfs).reset_index(drop=True)
         log_rank_0(f'train.shape: {train_df.shape}')
     if args.do_train or args.do_val:
-        val_df = pd.read_csv(args.val_file)[:10]
+        val_df = pd.read_csv(args.val_file)[:10].reset_index(drop=True)
+        # val uses the first dataset_dir; offset is 0 there.
+        val_df["hf_idx"] = val_df["idx"]
         val_df.attrs['file'] = args.val_file
         log_rank_0(f'val.shape: {val_df.shape}')
     if args.do_test:

@@ -10,5 +10,5 @@ mkdir -p logs/$EXP_NO
 export SAVE_PATH=output/${EXP_NO}
 export DATASET_DIR_TRAIN=data/hf/markushgrapher-synthetic-training
 export TRAIN_FILE=data/hf/synthetic-train.processed.csv
-export VAL_FILE=data/hf/synthetic-val.processed.csv
+export VAL_FILE=data/hf/synthetic-test.processed.csv
 sh scripts/train.sh > logs/$EXP_NO/$EXP_NO.log

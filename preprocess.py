@@ -150,18 +150,28 @@ def load_mol(example: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
     return mol, None
 
 
+_EMPTY_JSON_LIST = json.dumps([], separators=(",", ":"))
+
+
+def _empty_row(example_id, idx) -> Dict[str, str]:
+    return {
+        "idx": idx,
+        "id": example_id,
+        "raw_SMILES": "",
+        "SMILES": "",
+        "node_coords": _EMPTY_JSON_LIST,
+        "bracket_tokens": _EMPTY_JSON_LIST,
+        "bracket_coords": _EMPTY_JSON_LIST,
+        "edges": _EMPTY_JSON_LIST,
+    }
+
+
 def get_row(example: Dict[str, Any], idx: int) -> Dict[str, str]:
     example_id = example["id"]
     mol, molblock = load_mol(example)
-    # Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
-    # Chem.Kekulize(mol)
-    # raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=True, canonical=False)
-
-    # for atom in mol.GetAtoms():
-    #     if atom.GetAtomicNum() == 0:
-    #         props = atom.GetPropsAsDict()
-    #         print(f"Atom {atom.GetIdx()}: {props}")
-    # exit(0)
+    if mol is None:
+        # Unparseable cxsmiles/molblock — emit an empty row, filtered out below.
+        return _empty_row(example_id, idx)
 
     try:
         raw_smi = Chem.MolToSmiles(mol, kekuleSmiles=False, canonical=False)
@@ -268,6 +278,14 @@ def dataset2csv(dataset, ofn: str) -> None:
         num_proc=8,
         remove_columns=dataset.column_names
     )
+    n_before = len(updated_dataset)
+    updated_dataset = updated_dataset.filter(
+        lambda r: r["raw_SMILES"] != "",
+        num_proc=8,
+    )
+    n_after = len(updated_dataset)
+    if n_after < n_before:
+        print(f"{ofn}: dropped {n_before - n_after}/{n_before} unparseable rows")
     updated_dataset.to_csv(ofn)
 
 
@@ -287,8 +305,6 @@ def load_split(dataset_dir: str, split: str):
 
 
 def aggregate_into_csv(args) -> None:
-    csv_output_path = "data/hf"
-    os.makedirs(csv_output_path, exist_ok=True)
     dataset_dirs = [
         ("data/MG1/markushgrapher-synthetic-training", "train", "synthetic-train.processed.csv"),
         ("data/MG1/markushgrapher-synthetic-training", "test", "synthetic-test.processed.csv"),
@@ -297,7 +313,7 @@ def aggregate_into_csv(args) -> None:
     ]
 
     for dataset_dir, split, csv_fn in dataset_dirs:
-        ofn = os.path.join(csv_output_path, csv_fn)
+        ofn = os.path.join(dataset_dir, csv_fn)
 
         dataset = load_split(dataset_dir, split)
 

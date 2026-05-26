@@ -101,9 +101,14 @@ class TrainDataset(Dataset):
         cond = (idx == 0)
         cond = False
 
-        # file_path = self.file_paths[idx]
-        # image = cv2.imread(file_path)
-        image = self.hf_dataset[idx]["page_image"].convert("RGB")
+        # train.py adds an "hf_idx" column that maps each CSV row to its
+        # position in the (possibly concatenated, possibly partly-filtered) HF
+        # image dataset. Fall back to the positional idx when absent.
+        if "hf_idx" in self.df.columns:
+            hf_idx = int(self.df.loc[idx, "hf_idx"])
+        else:
+            hf_idx = idx
+        image = self.hf_dataset[hf_idx]["page_image"].convert("RGB")
         image = np.array(image)             # RGB uint8 numpy array
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
