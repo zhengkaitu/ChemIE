@@ -70,5 +70,5 @@ $ bash scripts/submit_train_MGrapher_1+2.sh
 ### 5. Predict and evaluate with MolScribe
 
 ```shell
-$ python predict.py
+$ python predict.py --model_path=output/MGrapher_1+2/swin_base_transformer_last.pth --id=MG1+2_on_m2s_uspto
 ```
