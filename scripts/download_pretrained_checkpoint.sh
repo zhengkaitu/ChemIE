@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FILE=./ckpts/swin_base_char_aux_1m.pth
+FILE=./ckpts/swin_base_char_aux_1m680k.pth
 
 if [ -f "$FILE" ]; then
     echo "Skipping — $FILE already exists."
@@ -10,4 +10,4 @@ fi
 
 mkdir -p ./ckpts
 echo "Downloading MolScribe checkpoint -> $FILE"
-huggingface-cli download yujieq/MolScribe swin_base_char_aux_1m.pth --local-dir ./ckpts
+huggingface-cli download yujieq/MolScribe swin_base_char_aux_1m680k.pth --local-dir ./ckpts
