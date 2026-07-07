@@ -71,4 +71,6 @@ $ bash scripts/submit_train_MGrapher_1+2.sh
 
 ```shell
 $ python predict.py --model_path=output/MGrapher_1+2/swin_base_transformer_last.pth --id=MG1+2_on_m2s_uspto
+$ python evaluate.py --test_path=data/m2s_images --pred_root_path=predictions/image_comparison_MG1+2_on_m2s_uspto
+$ python evaluate.py --test_path=data/uspto-markush_images --pred_root_path=predictions/image_comparison_MG1+2_on_m2s_uspto
 ```
